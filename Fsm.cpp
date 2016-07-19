@@ -16,12 +16,27 @@
 #include "Fsm.h"
 
 
-State::State(void (*on_enter)(), void (*on_exit)())
-: on_enter(on_enter),
-  on_exit(on_exit)
+CBState::CBState(void (*callback_enter)(), void (*callback_exit)())
+: callback_enter(callback_enter),
+  callback_exit(callback_exit)
 {
 }
 
+void CBState::on_enter()
+{
+  if (callback_enter != NULL)
+  {
+    callback_enter();
+  }
+}
+
+void CBState::on_exit()
+{
+  if (callback_exit != NULL)
+  {
+    callback_exit();
+  }
+}
 
 Fsm::Fsm(State* initial_state)
 : m_current_state(initial_state),
@@ -33,12 +48,18 @@ Fsm::Fsm(State* initial_state)
 
 Fsm::~Fsm()
 {
+  for (int i = 0; i < m_num_transitions; ++i)
+  {
+    if (m_transitions[i]->to_delete)
+    {
+      delete m_transitions[i];
+    }
+  }
   free(m_transitions);
   free(m_timed_transitions);
   m_transitions = NULL;
   m_timed_transitions = NULL;
 }
-
 
 void Fsm::add_transition(State* state_from, State* state_to, int event,
                          void (*on_transition)())
@@ -46,23 +67,39 @@ void Fsm::add_transition(State* state_from, State* state_to, int event,
   if (state_from == NULL || state_to == NULL)
     return;
 
-  Transition transition = Fsm::create_transition(state_from, state_to, event,
+  Transition *transition = Fsm::create_transition(state_from, state_to, event,
                                                on_transition);
-  m_transitions = (Transition*) realloc(m_transitions, (m_num_transitions + 1)
-                                                       * sizeof(Transition));
+  transition->to_delete = true;
+  add_transition(transition);
+}
+
+void Fsm::add_transition(Transition *transition)
+{
+  if (transition == NULL)
+    return;
+
+  m_transitions = (Transition**) realloc(m_transitions, (m_num_transitions + 1)
+                                                       * sizeof(Transition*));
   m_transitions[m_num_transitions] = transition;
   m_num_transitions++;
 }
 
-
 void Fsm::add_timed_transition(State* state_from, State* state_to,
                                unsigned long interval, void (*on_transition)())
 {
-  if (state_from == NULL || state_to == NULL)
-    return;
+ if (state_from == NULL || state_to == NULL)
+   return;
 
-  Transition transition = Fsm::create_transition(state_from, state_to, 0,
-                                                 on_transition);
+ Transition *transition = Fsm::create_transition(state_from, state_to, 0,
+                                                on_transition);
+ transition->to_delete = true;
+ add_timed_transition(interval, transition);
+}
+
+void Fsm::add_timed_transition(unsigned long interval, Transition *transition)
+{
+  if (transition == NULL)
+    return;
 
   TimedTransition timed_transition;
   timed_transition.transition = transition;
@@ -76,14 +113,14 @@ void Fsm::add_timed_transition(State* state_from, State* state_to,
 }
 
 
-Fsm::Transition Fsm::create_transition(State* state_from, State* state_to,
-                                       int event, void (*on_transition)())
+Transition* Fsm::create_transition(State* state_from, State* state_to,
+                                       int event, void (*callback_transition)())
 {
-  Transition t;
-  t.state_from = state_from;
-  t.state_to = state_to;
-  t.event = event;
-  t.on_transition = on_transition;
+  CBTransition *t = new CBTransition();
+  t->state_from = state_from;
+  t->state_to = state_to;
+  t->event = event;
+  t->callback_transition = callback_transition;
 
   return t;
 }
@@ -93,10 +130,10 @@ void Fsm::trigger(int event)
   // Find the transition with the current state and given event.
   for (int i = 0; i < m_num_transitions; ++i)
   {
-    if (m_transitions[i].state_from == m_current_state &&
-        m_transitions[i].event == event)
+    if (m_transitions[i]->state_from == m_current_state &&
+        m_transitions[i]->event == event)
     {
-      m_current_state = m_transitions[i].make_transition();
+      m_current_state = m_transitions[i]->make_transition();
       return;
     }
   }
@@ -108,7 +145,7 @@ void Fsm::check_timer()
   for (int i = 0; i < m_num_timed_transitions; ++i)
   {
     TimedTransition* transition = &m_timed_transitions[i];
-    if (transition->transition.state_from == m_current_state)
+    if (transition->transition->state_from == m_current_state)
     {
       if (transition->start == 0)
       {
@@ -120,7 +157,7 @@ void Fsm::check_timer()
         Serial.println(now);
         if (now - transition->start >= transition->interval)
         {
-          m_current_state = transition->transition.make_transition();
+          m_current_state = transition->transition->make_transition();
           transition->start = 0;
         }
       }
@@ -128,18 +165,37 @@ void Fsm::check_timer()
   }
 }
 
+Transition::Transition()
+{
+  to_delete = false;
+}
 
-State* Fsm::Transition::make_transition()
+Transition::~Transition()
+{
+  // Nothing to do...
+}
+
+void CBTransition::on_transition()
+{
+  if (callback_transition != NULL)
+  {
+    callback_transition();
+  }
+}
+
+State* Transition::make_transition()
 {
   // Execute the handlers in the correct order.
-  if (state_from->on_exit != NULL)
+  bool changed = (state_from != state_to);
+  if (changed)
+  {
     state_from->on_exit();
-
-  if (on_transition != NULL)
-    on_transition();
-
-  if (state_to->on_enter != NULL)
+  }
+  on_transition();
+  if (changed)
+  {
     state_to->on_enter();
+  }
 
   return state_to;
 }
